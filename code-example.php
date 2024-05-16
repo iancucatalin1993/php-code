@@ -5,17 +5,23 @@ namespace App\Services;
 use App\Repositories\WorkforceProductivityRepository;
 use Illuminate\Support\Collection;
 
+define('HOUR_MINUTES', 60);
+
 class WorkforceProductivityService
 {
-    private WorkforceProductivityRepository $wpRepository;
-    private object $filters;
-    private int $defaultCurrency;
+    private readonly WorkforceProductivityRepository $wpRepository;
+    private readonly object $filters;
+    private readonly int $defaultCurrency;
 
-    private Collection $billedFluxes;
-    private Collection $filteredWorklogs;
-    private Collection $allProjectsWorklogs;
-    private array $allInvoiceRowValues;
-    private array $usersCostsByMonth;
+    private readonly Collection $billedFluxes;
+    private readonly Collection $filteredWorklogs;
+    private readonly Collection $allProjectsWorklogs;
+    private readonly array $allInvoiceRowValues;
+    private readonly array $usersCostsByMonth;
+
+    //===============================================================================================================================
+    // Constructor
+    //===============================================================================================================================
 
     public function __construct(WorkforceProductivityRepository $wpRepository, object $filters, int $defaultCurrency = EUR)
     {
@@ -38,6 +44,10 @@ class WorkforceProductivityService
         $this->getSubscriptionsLogsValue($this->filteredWorklogs);
     }
 
+    //===============================================================================================================================
+    // Public
+    //===============================================================================================================================
+
     public function getTotalIncomeAndCostsByMonth(): array
     {
         $incomePerMonth = [];
@@ -53,7 +63,7 @@ class WorkforceProductivityService
         return [$incomePerMonth, $costsPerMonth];
     }
 
-    //possible categories: users, activities
+    /**  possible categories: users, activities */
     public function getMonthlyIncomeByFluxLogs(?Collection $worklogs, string $categoryKey, array $filteredCategoryIds,
                                                ?array &$finalIdsList = null): array
     {
@@ -94,7 +104,10 @@ class WorkforceProductivityService
                 if (!in_array($categoryId, $filteredCategoryIds)) continue;
                 if (!is_null($finalIdsList) && !in_array($categoryId, $finalIdsList)) $finalIdsList[] = $categoryId;
 
-                $categoryFluxValue->percentage_logged = $fluxTotalLoggedValue ? $categoryFluxValue->logged_value / $fluxTotalLoggedValue : 0;
+                $categoryFluxValue->percentage_logged = 0;
+                if ($fluxTotalLoggedValue) {
+                    $categoryFluxValue->percentage_logged = $categoryFluxValue->logged_value / $fluxTotalLoggedValue;
+                }
                 $categoryFluxValue->billed_value = $billedFluxes[$fluxId]->billed_value * $categoryFluxValue->percentage_logged;
                 $categoryIncomeByMonth[$fluxMonth][$categoryId] ??= 0;
                 $categoryIncomeByMonth[$fluxMonth][$categoryId] += $categoryFluxValue->billed_value;
@@ -104,7 +117,7 @@ class WorkforceProductivityService
         return $categoryIncomeByMonth;
     }
 
-    //possible categories: projects, owners
+    /**  possible categories: projects, owners */
     public function getIncomeByBilledValue(string $categoryKey, array $filteredIds, array &$finalIdsList): array
     {
         //get billed value for each category, using the billing fluxes total billed value
@@ -122,7 +135,7 @@ class WorkforceProductivityService
         return $categoryIncomePerMonth;
     }
 
-    //possible categories: projects, owners, activities
+    /** possible categories: projects, owners, activities */
     public function getCategoryCostsByUserLogs(string $categoryKey): array
     {
         //get total user costs for each user and then for each category, per month
@@ -161,8 +174,8 @@ class WorkforceProductivityService
         return $categoryMonthCosts;
     }
 
-    //take into account the included value of subscription type project logs,
-    //and eliminate that value from the user/activities income calculation
+    /** Take into account the included value of subscription type project logs,
+      * and eliminate that value from the user/activities income calculation */
     public function getSubscriptionsLogsValue(Collection $worklogs): void
     {
         $logsByFluxId = $worklogs->groupBy('flux_id');
@@ -172,13 +185,12 @@ class WorkforceProductivityService
                     $this->getSubscriptionsIncomeByFluxLogs($fluxLogs, $this->billedFluxes[$fluxId]);
                 }
             } catch (\Throwable $e) {
-                sendErrorReport('Workforce productivity - get logs value for fixed sum/subscriptions error', $e);
+                send_error_report('Workforce productivity - get logs value for fixed sum/subscriptions error', $e);
             }
         }
     }
 
-    public function getUsersFixedSumProjectsValue(array &$userIncomeByMonth, ?Collection $worklogs = null,
-                                                  ?array &$usersIdsWithValues = null): void
+    public function getUsersFixedSumProjectsValue(array &$userIncomeByMonth, ?Collection $worklogs = null, ?array &$usersIdsWithValues = null): void
     {
         $worklogs ??= $this->filteredWorklogs;
         $billedProjectsIds = collect($this->allInvoiceRowValues)->whereNotNull('project_id')->pluck('project_id');
@@ -186,7 +198,7 @@ class WorkforceProductivityService
         $projectsWithLogs = $this->wpRepository->getFixedSumProjectsWithLogs($billedProjectsIds ?? null);
 
         //get the ratio of the total value users get as income from the projects
-        $usersLoggedTimeRatio = $this->getFixedSumUsersLoggedTimeRatio($worklogs, $projectsWithLogs);
+        $projectLoggedTimeRatio = $this->getFixedSumProjectLoggedTimeRatio($worklogs, $projectsWithLogs);
 
         //get the billed value per fixed sum project, per month, with the users
         $projectIncomePerMonth = [];
@@ -196,19 +208,21 @@ class WorkforceProductivityService
             if (empty($projectsWithLogs[$projectId])) continue;
 
             $projectIncomePerMonth[$invoiceRow->invoice_month][$projectId] ??= 0;
-            $projectIncomePerMonth[$invoiceRow->invoice_month][$projectId] += $invoiceRow->billed_value * ($usersLoggedTimeRatio[$projectId] ?? 1);
+            $projectIncomePerMonth[$invoiceRow->invoice_month][$projectId] += $invoiceRow->billed_value * ($projectLoggedTimeRatio[$projectId] ?? 1);
         }
 
         //get the total value grouped by project and the total value per project/user
         $usersLoggedTotal = [];
-        $projectsLoggedTotal = [];
+        $projectsLoggedValue = [];
         foreach ($worklogs as $log) {
             if (empty($projectsWithLogs[$log->project_id])) continue;
 
+            $value = $log->included_in_value == 1 ? $log->value : ($log->rate * $log->billed_time / 60);
+
             $usersLoggedTotal[$log->project_id][$log->user_id] ??= 0;
-            $usersLoggedTotal[$log->project_id][$log->user_id] += $log->value;
-            $projectsLoggedTotal[$log->project_id] ??= 0;
-            $projectsLoggedTotal[$log->project_id] += $log->value;
+            $usersLoggedTotal[$log->project_id][$log->user_id] += $value;
+            $projectsLoggedValue[$log->project_id] ??= 0;
+            $projectsLoggedValue[$log->project_id] += $value;
         }
         //use the two totals to calculate the ratio value per user, per project
         $usersIncomeRatio = [];
@@ -216,7 +230,12 @@ class WorkforceProductivityService
             foreach ($projectUsers as $userId => $userValue) {
                 if (empty($projectsWithLogs[$projectId])) continue;
 
-                $usersIncomeRatio[$projectId][$userId] = $userValue / $projectsLoggedTotal[$projectId];
+                if ($projectsLoggedValue[$projectId] != 0) {
+                    $usersIncomeRatio[$projectId][$userId] = $userValue / $projectsLoggedValue[$projectId];
+                } else {
+                    //when the total logged values is 0, split the ratio equally between users
+                    $usersIncomeRatio[$projectId][$userId] = 1 / count($projectUsers);
+                }
             }
         }
 
@@ -234,7 +253,7 @@ class WorkforceProductivityService
         }
     }
 
-    //used to calculate the value per user when there are no billed logs for the fixed sum project
+    /** used to calculate the value per user when there are no billed logs for the fixed sum project */
     public function getFixedSumNoLogsValue(array &$userIncomeByMonth, ?array &$usersIdsWithValues = null): void
     {
         $projectsWithoutLogs = $this->wpRepository->getFixedSumProjectsWithoutLogs($this->filters->projectsList ?? null);
@@ -255,7 +274,7 @@ class WorkforceProductivityService
                 foreach ($projectWorkingUsers as $userData) {
                     //convert the users hourly rate
                     if (isset($userData->currency)) {
-                        $userData->rate *= exchangeCurrency($this->defaultCurrency, $userData->currency);
+                        $userData->rate *= exchange_currency($this->defaultCurrency, $userData->currency);
                         unset($userData->currency);
                     }
                     //get the total hourly rate, to use to express each user's proportion
@@ -292,11 +311,13 @@ class WorkforceProductivityService
         $costsByMonth = [];
         foreach ($this->usersCostsByMonth as $month => $usersMonthCosts) {
             foreach ($usersMonthCosts as $userId => $userCosts) {
-                $costRatio[$month][$userId] = 1;
-                if (isset($userIncomeByMonthAllProjects[$month][$userId]) &&
-                    ($userIncomeByMonth[$month][$userId] ?? 0) > 0 &&
-                    $userIncomeByMonthAllProjects[$month][$userId] > 0
-                ) {
+                $costRatio[$month][$userId] = 0;
+                //if the user has no income in any projects, then show the complete cost regardless of the project filters
+                //since it means that the costs are unrelated to any project
+                if (empty($userIncomeByMonthAllProjects[$month][$userId])) {
+                    $costRatio[$month][$userId] = 1;
+                //user has costs per month related to the projects, so apply a custom ratio
+                } else if (($userIncomeByMonth[$month][$userId] ?? 0) > 0) {
                     $costRatio[$month][$userId] = $userIncomeByMonth[$month][$userId] / $userIncomeByMonthAllProjects[$month][$userId];
                 }
                 $costsByMonth[$month][$userId] = $userCosts * $costRatio[$month][$userId];
@@ -307,7 +328,7 @@ class WorkforceProductivityService
     }
 
     //===============================================================================================================================
-    // Locals
+    // Private
     //===============================================================================================================================
 
     private function getSubscriptionsIncomeByFluxLogs(Collection $fluxWorklogs, object $fluxInfo): void
@@ -322,25 +343,25 @@ class WorkforceProductivityService
 
             $minutesValidated += ($log->billable ?? $log->billed_time);
             //the value any time that is not over the project time in calculated at the special project hourly rate
-            if ($minutesValidated <= $fluxInfo->project_hours * 60) {
+            if ($minutesValidated <= $fluxInfo->project_hours * HOUR_MINUTES) {
                 //express the user hourly rate relative to the actual billed value
                 $log->rate *= $billedValueRateRatio;
-                $log->value = getLogValue($log, $this->defaultCurrency);
+                $log->value = get_log_value($log, $this->defaultCurrency);
                 continue;
             }
             //if the time is over the project hours, then it is calculated at the user's own hourly rate
-            $logValue = getLogValue($log, $this->defaultCurrency);
+            $logValue = get_log_value($log, $this->defaultCurrency);
             $log->value = $logValue;
             //when the time is first exceeded, calculate the split time log value at the two different rates
             if (!$projectTimeExceeded) {
                 $projectTimeExceeded = true;
                 //when custom value exists ignore extra value calculation
                 if (!isset($log->custom_value)) {
-                    $splitOverTime = $minutesValidated - ($fluxInfo->project_hours * 60);
+                    $splitOverTime = $minutesValidated - ($fluxInfo->project_hours * HOUR_MINUTES);
                     $initialRateTime = $log->billed_time - $splitOverTime;
 
-                    $logFirstHalfValue = $log->rate * $billedValueRateRatio * $initialRateTime / 60;
-                    $logSecondHalfValue = $log->rate * $splitOverTime / 60;
+                    $logFirstHalfValue = $log->rate * $billedValueRateRatio * $initialRateTime / HOUR_MINUTES;
+                    $logSecondHalfValue = $log->rate * $splitOverTime / HOUR_MINUTES;
                     $log->value = ($logFirstHalfValue + $logSecondHalfValue) * $log->exchange_rate;
                 }
             }
@@ -359,27 +380,27 @@ class WorkforceProductivityService
         $totalLogsTime = 0;
         foreach ($worklogs as $log) {
             //calculate the total time and value for the project included time, at the user's own rate
-            if ($totalLogsTime + $log->billed_time <= $fluxInfo->project_hours * 60) {
+            if ($totalLogsTime + $log->billed_time <= $fluxInfo->project_hours * HOUR_MINUTES) {
                 $totalLogsTime += $log->billed_time;
-                $totalLogsValue += getLogValue($log, $this->defaultCurrency);
+                $totalLogsValue += get_log_value($log, $this->defaultCurrency);
             } else {
                 //extra case only one time if a log partly exceeds the included value
-                $remainingBillableTime = $fluxInfo->project_hours * 60 - $totalLogsTime;
+                $remainingBillableTime = $fluxInfo->project_hours * HOUR_MINUTES - $totalLogsTime;
                 if ($remainingBillableTime > 0) {
                     $splitLog = clone $log;
                     $totalLogsTime += $remainingBillableTime;
                     $splitLog->billed_time = $remainingBillableTime;
-                    $totalLogsValue += getLogValue($splitLog, $this->defaultCurrency);
+                    $totalLogsValue += get_log_value($splitLog, $this->defaultCurrency);
                 }
                 break;
             }
         }
         if ($totalLogsTime == 0 || $totalLogsValue == 0) return 0;
 
-        return $projectAverageHourlyRate * ($totalLogsTime / 60) / $totalLogsValue;
+        return $projectAverageHourlyRate * ($totalLogsTime / HOUR_MINUTES) / $totalLogsValue;
     }
 
-    private function getFixedSumUsersLoggedTimeRatio($worklogs, $projectsWithLogs): array
+    private function getFixedSumProjectLoggedTimeRatio($worklogs, $projectsWithLogs): array
     {
         $projectsLoggedTime = [];
         //get the total logged time
@@ -390,23 +411,23 @@ class WorkforceProductivityService
             $projectsLoggedTime[$log->project_id] += $log->billed_time;
         }
 
-        $userHoursRatio = [];
+        $projectHoursRatio = [];
         foreach ($projectsLoggedTime as $projectId => $projectLoggedTime) {
             $projectInfo = $projectsWithLogs[$projectId];
             //ignore the calculation for specific cases
             if ($projectInfo->project_hours == 0 || $projectLoggedTime == 0 ||
                ($projectInfo->include_extra_hours == 1 && $projectInfo->logs_relative_value == 0)
             ) {
-                $userHoursRatio[$projectId] = 1;
+                $projectHoursRatio[$projectId] = 1;
                 continue;
             }
             //ignore the cost ratio in every case other than $projectInfo->include_extra_hours == 1 && $loggedTime < $projectInfo->project_hours
-            $userHoursRatio[$projectId] = ($projectLoggedTime / 60) / $projectInfo->project_hours;
+            $projectHoursRatio[$projectId] = ($projectLoggedTime / HOUR_MINUTES) / $projectInfo->project_hours;
             //the ratio can never be higher than 1
-            if ($userHoursRatio[$projectId] > 1) $userHoursRatio[$projectId] = 1;
+            if ($projectHoursRatio[$projectId] > 1) $projectHoursRatio[$projectId] = 1;
         }
 
-        return $userHoursRatio;
+        return $projectHoursRatio;
     }
 
     private function getUsersCostsGroupedByMonth(): array
